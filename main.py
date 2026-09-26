@@ -1,163 +1,105 @@
-import streamlit as st
-import requests
-import time
-from datetime import datetime, date
-import pandas as pd
+(function() {
+    // ================= 설정 영역 =================
+    const TARGET_KEYWORD = "치이카와";  // 찾고자 하는 영화 키워드
+    const CHECK_INTERVAL_SEC = 5;       // 새로고침 주기 (5초 권장)
+    // ============================================
 
-# 메가박스 실제 사용 극장 코드 (0013 = 코엑스)
-THEATER_MAP = {
-    "코엑스": "0013",
-    "강남": "0023",
-    "성수": "0056",
-    "홍대": "0046",
-    "신촌": "0028",
-    "목동": "0011",
-    "하남스타필드": "0044",
-    "고양스타필드": "0047",
-    "수원스타필드": "0070",
-    "대전현대아울렛": "0059",
-    "대구신세계": "0045",
-    "부산대": "0007"
-}
+    console.log(`[감시 시작] 키워드: '${TARGET_KEYWORD}', 주기: ${CHECK_INTERVAL_SEC}초`);
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Referer": "https://www.megabox.co.kr/booking/timetable",
-    "Origin": "https://www.megabox.co.kr",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "X-Requested-With": "XMLHttpRequest"
-}
+    // 비프음 알람 생성기
+    const playAlertSound = () => {
+        try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(880, ctx.currentTime); // 880Hz 고음
+            gain.gain.setValueAtTime(0.5, ctx.currentTime);
+            osc.start();
+            osc.stop(ctx.currentTime + 1.2);
+        } catch(e) {
+            console.error("오디오 재생 오류:", e);
+        }
+    };
 
-def fetch_megabox_raw(brch_no, play_de):
-    """메가박스 서버에서 상영시간표 원본 데이터를 호출합니다."""
-    url = "https://www.megabox.co.kr/on/oh/ohc/Brch/schedulePage.do"
-    
-    # 메가박스 기본 상영시간표 요청 파라미터
-    payload = {
-        "masterType": "brch",
-        "detailType": "",
-        "brchNo": brch_no,
-        "firstAt": "N",
-        "playDe": play_de
-    }
+    // 상단 알림 배너 UI 주입
+    const banner = document.createElement("div");
+    banner.id = "tracker-banner";
+    banner.style.cssText = `
+        position: fixed; top: 10px; right: 10px; z-index: 999999;
+        background: #111827; color: #fff; padding: 16px 24px;
+        border-radius: 12px; border: 2px solid #8b5cf6;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.5); font-family: sans-serif;
+    `;
+    banner.innerHTML = `
+        <div style="font-weight:bold; font-size:16px; margin-bottom:4px; color:#a78bfa;">
+            🎟️ 실시간 회차 감시기 작동 중
+        </div>
+        <div id="tracker-status" style="font-size:13px; color:#9ca3af;">
+            키워드: [${TARGET_KEYWORD}] 감시 대기 중...
+        </div>
+        <button id="tracker-stop-btn" style="
+            margin-top:8px; padding:4px 10px; background:#ef4444; color:#fff;
+            border:none; border-radius:4px; cursor:pointer; font-size:12px;
+        ">감시 중지</button>
+    `;
+    document.body.appendChild(banner);
 
-    try:
-        res = requests.post(url, data=payload, headers=HEADERS, timeout=8)
-        if res.status_code != 200:
-            return None, f"HTTP {res.status_code} 오류"
-        return res.json(), "성공"
-    except Exception as e:
-        return None, str(e)
+    let checkCount = 0;
+    let timerId = null;
 
-def parse_schedule(data, keyword="", screen_filter=""):
-    """응답 JSON에서 영화 및 회차 목록을 추출합니다."""
-    movie_list = data.get("megaMap", {}).get("movieFormList", [])
-    if not movie_list:
-        return []
+    document.getElementById("tracker-stop-btn").onclick = () => {
+        clearInterval(timerId);
+        banner.remove();
+        console.log("[감시 중지됨]");
+    };
 
-    results = []
-    cleaned_kw = keyword.replace(" ", "").lower()
+    const runCheck = () => {
+        checkCount++;
+        const now = new Date().toTimeString().split(" ")[0];
+        const statusEl = document.getElementById("tracker-status");
 
-    for movie in movie_list:
-        movie_nm = movie.get("movieNm", "")
-        # 키워드가 비어있으면 모든 영화 통과, 있으면 포함 여부 검사
-        if cleaned_kw and cleaned_kw not in movie_nm.replace(" ", "").lower():
-            continue
+        // 1. 현재 화면 전체 텍스트 및 시간표 영역에서 영화 키워드 검색
+        const pageText = document.body.innerText || "";
+        const timetableArea = document.querySelector(".theater-list") || document.body;
 
-        for play in movie.get("playScheduleList", []):
-            screen_nm = play.get("theabExposNm", "")
-            if screen_filter and screen_filter.upper() not in screen_nm.upper():
-                continue
+        const isFound = timetableArea.innerText.includes(TARGET_KEYWORD);
 
-            results.append({
-                "영화명": movie_nm,
-                "상영관": screen_nm,
-                "상영시간": f"{play.get('playStartTime', '')} ~ {play.get('playEndTime', '')}",
-                "잔여석": f"{play.get('restSeatCnt', 0)} / {play.get('totSeatCnt', 0)}"
-            })
-    return results
+        if (isFound) {
+            // 회차 발견 시
+            clearInterval(timerId);
+            playAlertSound();
+            setInterval(playAlertSound, 2000); // 2초마다 계속 알림음 울림
 
-# ================= UI 레이아웃 =================
-st.set_page_config(page_title="메가박스 예매 오픈 감시기", page_icon="🎟️", layout="centered")
+            if (statusEl) {
+                statusEl.innerHTML = `<span style="color:#34d399; font-weight:bold; font-size:15px;">🚨 [${TARGET_KEYWORD}] 예매 오픈 감지!! 지금 바로 좌석을 선택하세요!</span>`;
+            }
+            banner.style.borderColor = "#34d399";
+            banner.style.backgroundColor = "#064e3b";
 
-st.title("🎟️ 메가박스 실시간 오픈 감시기")
+            alert(`🚨 [${TARGET_KEYWORD}] 예매가 열렸습니다! 좌석을 선택하세요!`);
+            return;
+        }
 
-if "monitoring" not in st.session_state:
-    st.session_state.monitoring = False
+        // 2. 미오픈 상태일 때: 상태 메시지 갱신
+        if (statusEl) {
+            statusEl.innerText = `[${now}] ${checkCount}회차 확인 완료 (아직 미오픈) - ${CHECK_INTERVAL_SEC}초 후 재확인`;
+        }
 
-with st.container(border=True):
-    col1, col2 = st.columns(2)
-    with col1:
-        theater_name = st.selectbox("지점 선택", options=list(THEATER_MAP.keys()), index=0)
-        movie_keyword = st.text_input("영화 키워드 (예: 치이카와)", value="치이카와")
-        screen_type = st.text_input("상영관 필터 (선택)", placeholder="예: DOLBY (비우면 전체)")
-    with col2:
-        # 기본값: 2026년 9월 30일
-        target_date = st.date_input("상영 날짜", value=date(2026, 9, 30))
-        interval_sec = st.number_input("체크 주기 (초)", min_value=15, max_value=300, value=30)
-        discord_webhook = st.text_input("Discord Webhook (선택)", placeholder="https://discord.com/...")
+        // 3. 날짜/극장 새로고침 트리거
+        // 메가박스 빠른예매의 경우 활성화된 날짜 버튼을 다시 클릭해주면 전체 페이지를 새로고침하지 않고도 시간표만 리로드됩니다.
+        const activeDateBtn = document.querySelector(".date-area button.active, .time-schedule button.active");
+        if (activeDateBtn) {
+            activeDateBtn.click();
+        } else {
+            // 특정 버튼을 못 찾으면 페이지 새로고침 보조
+            // location.reload();
+        }
+    };
 
-col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
-
-def start_mon():
-    st.session_state.monitoring = True
-
-def stop_mon():
-    st.session_state.monitoring = False
-
-with col_btn1:
-    st.button("▶ 감시 시작", type="primary", use_container_width=True, on_click=start_mon, disabled=st.session_state.monitoring)
-with col_btn2:
-    st.button("⏹ 정지", use_container_width=True, on_click=stop_mon, disabled=not st.session_state.monitoring)
-with col_btn3:
-    test_btn = st.button("🔍 현재 열린 영화 확인", use_container_width=True)
-
-status_placeholder = st.empty()
-result_placeholder = st.empty()
-
-# [테스트 버튼]: 현재 날짜/지점에 실제로 어떤 영화가 열려있는지 즉시 확인
-if test_btn:
-    brch_code = THEATER_MAP[theater_name]
-    play_de_str = target_date.strftime("%Y%m%d")
-    raw_data, msg = fetch_megabox_raw(brch_code, play_de_str)
-    
-    if raw_data:
-        all_movies = parse_schedule(raw_data, keyword="")
-        if all_movies:
-            st.success(f"{theater_name} ({target_date}) 현재 등록된 상영 회차 총 {len(all_movies)}건")
-            st.dataframe(pd.DataFrame(all_movies), use_container_width=True)
-        else:
-            st.warning(f"{theater_name} ({target_date})에는 아직 어떤 영화도 시간표가 등록되지 않았습니다.")
-    else:
-        st.error(f"데이터 조회 실패: {msg}")
-
-# 실시간 모니터링 루프
-if st.session_state.monitoring:
-    brch_code = THEATER_MAP[theater_name]
-    play_de_str = target_date.strftime("%Y%m%d")
-
-    while st.session_state.monitoring:
-        now_str = datetime.now().strftime("%H:%M:%S")
-        raw_data, msg = fetch_megabox_raw(brch_code, play_de_str)
-
-        if not raw_data:
-            status_placeholder.error(f"[{now_str}] 조회 실패: {msg}")
-            time.sleep(interval_sec)
-            continue
-
-        matched_schedules = parse_schedule(raw_data, movie_keyword, screen_type)
-
-        if matched_schedules:
-            status_placeholder.success(f"🎉 [{now_str}] '{movie_keyword}' 상영 일정이 감지되었습니다! (총 {len(matched_schedules)}회차)")
-            result_placeholder.dataframe(pd.DataFrame(matched_schedules), use_container_width=True)
-            st.session_state.monitoring = False
-            st.balloons()
-            break
-        else:
-            total_registered = len(parse_schedule(raw_data, keyword=""))
-            if total_registered > 0:
-                status_placeholder.info(f"⏳ [{now_str}] 시간표는 열렸으나(다른 영화 {total_registered}건 있음), '{movie_keyword}'는 아직 없습니다.")
-            else:
-                status_placeholder.info(f"⏳ [{now_str}] {target_date} 일자의 상영시간표 전체가 아직 열리지 않았습니다.")
-            
-            time.sleep(interval_sec)
+    // 설정된 주기마다 검사 실행
+    timerId = setInterval(runCheck, CHECK_INTERVAL_SEC * 1000);
+    runCheck(); // 즉시 첫 1회 실행
+})();
